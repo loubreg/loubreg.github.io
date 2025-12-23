@@ -1,11 +1,10 @@
 # Here is the code to create a dynamic map from strava output.
-# This code runs slowly to generate the HTML file, but it parses through both GMX files and FIT files.
+# This code runs slowly to generate the HTML file, but it parses through both GPX files and FIT files.
 # See the README for more details on how to set up and run this program!
 
-# If you only have gmx files, there is commented out code below that only deals with gmx files and runs quickly!
+# If you only have gpx files, there is commented out code below that only deals with gpx files and runs quickly!
 
 # Enjoy!
-
 
 import os
 import glob
@@ -13,12 +12,22 @@ import numpy as np
 import folium
 import gzip
 import pandas as pd
+
+import geopandas as gpd
+from shapely.geometry import LineString
+from shapely.geometry import Point
+
 from fitparse import FitFile
 from xml.etree import ElementTree as ET
 from datetime import datetime
 from argparse import ArgumentParser, Namespace
 
+from geopy import distance
+from geopy.distance import geodesic
 
+MAXDIST=25 # used to limit detail and trim size of HTML file. Only plot the next point if it is MAXDIST from the last point
+START_COORDS= (43.7, -72.3)     # map center (e.g., New Hampshire)
+ZOOM=8  #starting map zoom
 
 def extract_gpx_info(gpx_file: str) -> tuple:
     # extract activity name and formatted date from GPX file
@@ -28,9 +37,10 @@ def extract_gpx_info(gpx_file: str) -> tuple:
 
     name = root.find('.//gpx:name', namespace).text
     time = root.find('.//gpx:metadata/gpx:time', namespace).text
+    aType = root.find('.//gpx:type', namespace).text
     date_obj = datetime.strptime(time, '%Y-%m-%dT%H:%M:%SZ')
     formatted_date = date_obj.strftime('%B %d, %Y %I:%M %p')
-    return name, formatted_date
+    return name, formatted_date, aType
 
 def extract_fit_info(fit_file: str, activities_df: pd.DataFrame) -> tuple:
     # extract activity name, date, and activity ID from FIT file
@@ -48,11 +58,38 @@ def extract_fit_info(fit_file: str, activities_df: pd.DataFrame) -> tuple:
             return "fail", "fail", "fail"
         activity_name = match.iloc[0]["Activity Name"]
         activity_id = str(match.iloc[0]["Activity ID"])
-        return activity_name, formatted_time, activity_id
+        activity_type = match.iloc[0]["Activity Type"]
+        
+        return activity_name, formatted_time, activity_id, activity_type
     except Exception as e:
         print(f"FIT read error {fit_file}: {e}")
         return "fail", "fail", "fail"
 
+# Using distance based sampling to reduce file size
+    # def read_fit_trackpoints(fit_file: str) -> np.ndarray:
+#     """Return lat/lon points from a FIT file"""
+#     try:
+#         from_point=[0,0]
+#         fit = FitFile(fit_file)
+#         lat_lon_data = []
+#         for record in fit.get_messages('record'):
+#             lat = record.get_value('position_lat')
+#             lon = record.get_value('position_long')
+#             if lat is not None and lon is not None:
+#                 # convert semicircles to degrees (from google)
+#                 lat_deg = lat * (180 / 2**31)
+#                 lon_deg = lon * (180 / 2**31)
+#                 distance = geodesic(from_point, [lat_deg, lon_deg])
+#                 # print (distance.meters)
+#                 if distance.meters > MAXDIST:
+#                   lat_lon_data.append([lat_deg, lon_deg])
+#                   from_point=[lat_deg, lon_deg]
+
+#         return np.array(lat_lon_data)
+#     except:
+#         return np.array([])
+
+#Using no sampling to reduce file size
 def read_fit_trackpoints(fit_file: str) -> np.ndarray:
     """Return lat/lon points from a FIT file"""
     try:
@@ -70,9 +107,11 @@ def read_fit_trackpoints(fit_file: str) -> np.ndarray:
     except:
         return np.array([])
 
-
 def main(args: Namespace) -> None:
+
     # load activities CSV
+    linecolor="red"
+    lineweight=1
     activities_df = pd.read_csv('activities.csv')
     activities_df["Activity Date"] = pd.to_datetime(
         activities_df["Activity Date"],
@@ -86,14 +125,22 @@ def main(args: Namespace) -> None:
     gpx_files = glob.glob(f'{args.gpx_dir}/*.gpx')
     fit_files = glob.glob(f'{args.fit_dir}/*.fit.gz') # diff folder for fit fyi
 
-
     if not gpx_files and not fit_files:
         exit("ERROR: No GPX or FIT files found!")
 
     # initialize map
-    map_center = [44, -71.5]  # center around NE
-    m = folium.Map(location=map_center, zoom_start=6)
+    # m = folium.Map(location=START_COORDS, zoom_start=ZOOM) #standard OpenStreetMap
 
+    # custom mapbox map
+    MAPBOX_TOKEN = "pk.eyJ1IjoibGJyZWdvdSIsImEiOiJjbWZyNXFnOWwwM2diMmlvcXB6M3M4bHdzIn0.ainJCdTcN4gJLONN7TBZHg"
+
+    m = folium.Map(
+        location=START_COORDS, 
+        zoom_start=ZOOM,
+        #tiles=f"https://api.mapbox.com/styles/v1/lbregou/cmfpl06zz00ht01qkfq3h2dp1/tiles/256/{{z}}/{{x}}/{{y}}?access_token={MAPBOX_TOKEN}",
+        tiles=f"https://api.mapbox.com/styles/v1/lbregou/cmfpl0bnp00h801qhfsbn3mrw/tiles/256/{{z}}/{{x}}/{{y}}?access_token={MAPBOX_TOKEN}",
+        attr='Mapbox - Bregou Custom Map'
+    )
 
     # Custom tooltip CSS
     custom_css = """
@@ -113,10 +160,10 @@ def main(args: Namespace) -> None:
     """
     m.get_root().html.add_child(folium.Element(custom_css))
 
-    #This is for processing GPX files
+    #This is for processing GPX files with no sampling beyond lat_lon_data[::12] downsample
     for gpx_file in gpx_files:
         print(f"Reading GPX {os.path.basename(gpx_file)}")
-        activity_name, activity_date = extract_gpx_info(gpx_file)
+        activity_name, activity_date, activity_type = extract_gpx_info(gpx_file)
         lat_lon_data = []
         with open(gpx_file, encoding='utf-8') as file:
             for line in file:
@@ -128,20 +175,67 @@ def main(args: Namespace) -> None:
             continue
         lat_lon_data = lat_lon_data[::12]  # downsample
 
+    # This is for processing GPX files with intelligent distance sampling
+    # from_point = [0,0]
+    # for gpx_file in gpx_files:
+    #     print(f"Reading GPX {os.path.basename(gpx_file)}")
+    #     activity_name, activity_date, activity_type = extract_gpx_info(gpx_file)
+
+    #     lat_lon_data = []
+    #     with open(gpx_file, encoding='utf-8') as file:
+    #         for line in file:
+    #             if '<trkpt' in line:
+    #                 l = line.split('"')
+    #                 lat_lon_data.append([float(l[1]), float(l[3])])
+        #print(len(lat_lon_data))
+        # for item in lat_lon_data:
+        #     distance = geodesic(from_point, item)
+        #     if distance.meters < MAXDIST:
+        #         lat_lon_data.remove(item)
+        #     else:
+        #         from_point=item
+        # print(len(lat_lon_data))
+
+        # GeoDataFrame
+        # df = pd.DataFrame(lat_lon_data, columns=['longitude', 'latitude'])
+        # gdf = gpd.GeoDataFrame(df,geometry=gpd.points_from_xy(df['longitude'], df['latitude']),
+        # crs="EPSG:4326")  # Specify the Coordinate Reference System (CRS))
+
+        # Simplify the geometry
+        # small_gdf= gdf.simplify(tolerance=100) # Adjust tolerance as needed
+        
+        # lat_lon_data = [(point.x, point.y) for point in gdf.geometry]
+        
+        # lat_lon_data = np.array(lat_lon_data)
+
+        # if lat_lon_data.size == 0:
+        #     continue
+
+        match activity_type:
+            case "AlpineSki" | "NordicSki" | "IceSkate" | "BackcountrySki" | "Snowboard" | "Snowshoe":
+                linecolor="blue"
+                lineweight=1.5
+        if ("fat" in activity_name.casefold()) and ("father" not in activity_name.casefold()):
+                linecolor="blue"
+                lineweight=1.5
+
         polyline = folium.PolyLine(
             locations=lat_lon_data.tolist(),
-            color="blue",
-            weight=1,
-            opacity=0.8,
+            color=linecolor,
+            weight=lineweight,
+            opacity=1.0,
             tooltip=f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info"
         ).add_to(m)
+
+        linecolor="red"
+        lineweight=1
 
         activity_id = os.path.splitext(os.path.basename(gpx_file))[0]
         strava_url = f"https://www.strava.com/activities/{activity_id}"
         popup_content = f"""
         <strong>Activity:</strong> {activity_name}<br>
         <strong>Date:</strong> {activity_date}<br>
-        <a href="{strava_url}" target="_blank">View on Strava</a>
+        <b><a href="{strava_url}" target="_blank">View on Strava</a></b>
         """
         folium.Popup(popup_content, max_width=300).add_to(polyline)
 
@@ -159,7 +253,7 @@ def main(args: Namespace) -> None:
             else:
                 fit_path = fit_file
 
-            activity_name, activity_date, activity_id = extract_fit_info(fit_path, activities_df)
+            activity_name, activity_date, activity_id, activity_type = extract_fit_info(fit_path, activities_df)
             if activity_name == "fail":
                 print(f"Failed to match {fit_file}")
                 continue
@@ -168,21 +262,32 @@ def main(args: Namespace) -> None:
             if lat_lon_data.size == 0:
                 print(f"No trackpoints in {fit_file}")
                 continue
-            lat_lon_data = lat_lon_data[::8]
+            lat_lon_data = lat_lon_data[::8] # down sampling
+
+            match activity_type:
+                case "Alpine Ski" | "Nordic Ski" | "Ice Skate" | "Backcountry Ski" | "Snowboard" | "Snowshoe":
+                    linecolor="blue"
+                    lineweight=1.5
+            if ("fat" in activity_name.casefold()) and ("father" not in activity_name.casefold()):
+                    linecolor="blue"
+                    lineweight=1.5
 
             polyline = folium.PolyLine(
                 locations=lat_lon_data.tolist(),
-                color="blue",
-                weight=1,
-                opacity=0.8,
+                color=linecolor,
+                weight=lineweight,
+                opacity=1.0,
                 tooltip=f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info"
             ).add_to(m)
 
+            linecolor='red'
+            lineweight=1
+        
             strava_url = f"https://www.strava.com/activities/{activity_id}"
             popup_content = f"""
             <strong>Activity:</strong> {activity_name}<br>
             <strong>Date:</strong> {activity_date}<br>
-            <a href="{strava_url}" target="_blank">View on Strava</a>
+            <b><a href="{strava_url}" target="_blank">View on Strava</a></b>
             """
             folium.Popup(popup_content, max_width=300).add_to(polyline)
 
@@ -191,22 +296,25 @@ def main(args: Namespace) -> None:
 
 
     # Save map
-    m.save(args.output)
-    print(f"Saved interactive map to {args.output}")
+    # m.save(args.output)
 
+    m.save(outfile=args.output)
+    print(f"Saved interactive map to {args.output}")
 
 # CLI
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Generate an interactive map from GPX and FIT files")
+    parser.add_argument("--test", type=bool, default=False, help="Test mode when true")
     parser.add_argument("--gpx_dir", default="gpx", help="Directory containing GPX files")
     parser.add_argument("--fit_dir", default="fit", help="Directory containing FIT files")
     parser.add_argument("--output", default="index.html", help="Output HTML map file")
     args = parser.parse_args()
+    #args.test=True #force test mode if don't want to use command line switch --test TRUE
+    if args.test==True:
+        args.gpx_dir="gpxtest"
+        args.fit_dir="fittest"
     main(args)
-
-
-
 
 # Faster code, only for gpx files!
 # import os
@@ -249,7 +357,7 @@ if __name__ == "__main__":
 
 
 #     map_center = [0, 0]
-#     m = folium.Map(location=map_center, zoom_start=12)
+#     m = folium.Map(location=map_center, zoom_start=ZOOM)
 
 #     for gpx_file in gpx_files:
 #         print(f'Reading {os.path.basename(gpx_file)}')
