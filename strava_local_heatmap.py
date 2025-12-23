@@ -219,12 +219,38 @@ def main(args: Namespace) -> None:
                 linecolor="blue"
                 lineweight=1.5
 
-        polyline = folium.PolyLine(
-            locations=lat_lon_data.tolist(),
-            color=linecolor,
-            weight=lineweight,
-            opacity=1.0,
-            tooltip=f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info"
+        geojson_feature = {
+            "type": "Feature",
+            "properties": {
+                "name": activity_name,
+                "date": activity_date,
+                "color": linecolor,
+                "weight": lineweight
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [lon, lat] for lat, lon in lat_lon_data.tolist()
+                ]
+            }
+        }       
+
+        polyline = folium.GeoJson(
+            geojson_feature,
+            style_function=lambda x: {
+                "color": x["properties"]["color"],
+                "weight": x["properties"]["weight"],
+                "opacity": 1.0,
+            },
+            highlight_function=lambda x: {
+                "color": "yellow",
+                "weight": x["properties"]["weight"] + 2,
+                "opacity": 1.0,
+            },
+            tooltip=folium.Tooltip(
+                f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info",
+                sticky=True
+            )
         ).add_to(m)
 
         linecolor="red"
@@ -272,12 +298,38 @@ def main(args: Namespace) -> None:
                     linecolor="blue"
                     lineweight=1.5
 
-            polyline = folium.PolyLine(
-                locations=lat_lon_data.tolist(),
-                color=linecolor,
-                weight=lineweight,
-                opacity=1.0,
-                tooltip=f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info"
+            geojson_feature = {
+            "type": "Feature",
+            "properties": {
+                "name": activity_name,
+                "date": activity_date,
+                "color": linecolor,
+                "weight": lineweight
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [lon, lat] for lat, lon in lat_lon_data.tolist()
+                ]
+            }
+        }
+
+            polyline = folium.GeoJson(
+                geojson_feature,
+                style_function=lambda x: {
+                    "color": x["properties"]["color"],
+                    "weight": x["properties"]["weight"],
+                    "opacity": 1.0,
+                },
+                highlight_function=lambda x: {
+                    "color": "yellow",
+                    "weight": x["properties"]["weight"] + 2,
+                    "opacity": 1.0,
+                },
+                tooltip=folium.Tooltip(
+                    f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info",
+                    sticky=True
+                )
             ).add_to(m)
 
             linecolor='red'
