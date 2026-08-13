@@ -213,10 +213,10 @@ def main(args: Namespace) -> None:
 
         match activity_type:
             case "AlpineSki" | "NordicSki" | "IceSkate" | "BackcountrySki" | "Snowboard" | "Snowshoe":
-                linecolor="blue"
+                linecolor="fuchsia"
                 lineweight=1.5
         if ("fat" in activity_name.casefold()) and ("father" not in activity_name.casefold()):
-                linecolor="blue"
+                linecolor="fuchsia"
                 lineweight=1.5
 
         geojson_feature = {
@@ -292,10 +292,10 @@ def main(args: Namespace) -> None:
 
             match activity_type:
                 case "Alpine Ski" | "Nordic Ski" | "Ice Skate" | "Backcountry Ski" | "Snowboard" | "Snowshoe":
-                    linecolor="blue"
+                    linecolor="fuchsia"
                     lineweight=1.5
             if ("fat" in activity_name.casefold()) and ("father" not in activity_name.casefold()):
-                    linecolor="blue"
+                    linecolor="fuchsia"
                     lineweight=1.5
 
             geojson_feature = {
@@ -463,7 +463,7 @@ if __name__ == "__main__":
 #         # add GPX data as a polyline (for each ride independently), this is so the user can hover/click anywhere on the route to get more info instead of having specific buttons along the route they have to press to get the info.
 #         polyline = folium.PolyLine(
 #             locations=lat_lon_data.tolist(),  # list of [lat, lon] points
-#             color="blue",  # Here you can change the color of the line
+#             color="fuchsia",  # Here you can change the color of the line
 #             weight=2,  # line thickness
 #             opacity=0.8, 
 #             tooltip=(
