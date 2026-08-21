@@ -749,8 +749,40 @@ def main(args: Namespace) -> None:
 
                 var token = ++yearUpdateToken;
                 var rides = window.adventureRides || [];
+                var changes = [];
+
+                // Only process rides whose visibility actually changes.
+                // During Replay this is dramatically faster than scanning
+                // every ride on every year.
+                var previousYear = window.currentDisplayedYear;
+
+                if (previousYear === undefined || previousYear === null) {{
+                    // First update: establish the requested state.
+                    changes = rides.slice();
+                }} else if (selectedYear > previousYear) {{
+                    // Moving forward: only rides in the newly added years.
+                    for (var y = previousYear + 1; y <= selectedYear; y++) {{
+                        for (var i = 0; i < rides.length; i++) {{
+                            if (rides[i].year === y) {{
+                                changes.push(rides[i]);
+                            }}
+                        }}
+                    }}
+                }} else if (selectedYear < previousYear) {{
+                    // Moving backward: only rides in the years being removed.
+                    for (var y2 = previousYear; y2 > selectedYear; y2--) {{
+                        for (var j = 0; j < rides.length; j++) {{
+                            if (rides[j].year === y2) {{
+                                changes.push(rides[j]);
+                            }}
+                        }}
+                    }}
+                }}
+
+                window.currentDisplayedYear = selectedYear;
+
                 var index = 0;
-                var batchSize = 12;
+                var batchSize = 40;
 
                 function processBatch() {{
 
@@ -758,11 +790,11 @@ def main(args: Namespace) -> None:
                         return;
                     }}
 
-                    var end = Math.min(index + batchSize, rides.length);
+                    var end = Math.min(index + batchSize, changes.length);
 
                     for (; index < end; index++) {{
 
-                        var ride = rides[index];
+                        var ride = changes[index];
 
                         if (ride.year === null) {{
                             continue;
@@ -797,7 +829,7 @@ def main(args: Namespace) -> None:
                         }}
                     }}
 
-                    if (index < rides.length) {{
+                    if (index < changes.length) {{
                         window.requestAnimationFrame(processBatch);
                     }} else {{
                         yearUpdateRunning = false;
@@ -805,8 +837,6 @@ def main(args: Namespace) -> None:
                 }}
 
                 yearUpdateRunning = true;
-
-                // Yield before starting a potentially expensive Leaflet update.
                 window.requestAnimationFrame(processBatch);
             }}
 
@@ -870,7 +900,7 @@ def main(args: Namespace) -> None:
 
                         replayTimer = setTimeout(function() {{
                             playNextYear();
-                        }}, 900);
+                        }}, 450);
                     }}
 
                     window.requestAnimationFrame(waitForUpdate);
