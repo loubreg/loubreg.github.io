@@ -10,6 +10,7 @@ import os
 import glob
 import numpy as np
 import folium
+from branca.element import Element
 import gzip
 import pandas as pd
 
@@ -25,7 +26,59 @@ from argparse import ArgumentParser, Namespace
 from geopy import distance
 from geopy.distance import geodesic
 
-MAXDIST=25 # used to limit detail and trim size of HTML file. Only plot the next point if it is MAXDIST from the last point
+
+# Simplification tolerance in meters. 3 m keeps the visible route shape
+# very close to the original while removing large numbers of redundant GPS points.
+ROUTE_SIMPLIFY_METERS = 10.0
+
+def simplify_track(lat_lon_data: np.ndarray, tolerance_meters: float = ROUTE_SIMPLIFY_METERS) -> np.ndarray:
+    """Reduce GPS points while preserving the shape of the route.
+
+    Shapely's Douglas-Peucker simplification is applied in a local
+    latitude/longitude coordinate system. The longitude tolerance is
+    adjusted for latitude so the requested tolerance is approximately
+    the same in meters in both directions. Endpoints and significant
+    bends are retained.
+    """
+    if lat_lon_data is None or len(lat_lon_data) <= 2:
+        return lat_lon_data
+
+    # Remove immediately repeated points first.
+    keep = np.ones(len(lat_lon_data), dtype=bool)
+    if len(lat_lon_data) > 1:
+        keep[1:] = np.any(np.diff(lat_lon_data, axis=0) != 0, axis=1)
+    data = lat_lon_data[keep]
+
+    if len(data) <= 2:
+        return data
+
+    mean_lat = float(np.mean(data[:, 0]))
+    meters_per_degree_lat = 111_320.0
+    meters_per_degree_lon = max(111_320.0 * np.cos(np.radians(mean_lat)), 1.0)
+
+    # Work in approximately-meter coordinates, simplify, then convert back.
+    coords_xy = [(float(lon) * meters_per_degree_lon,
+                  float(lat) * meters_per_degree_lat)
+                 for lat, lon in data]
+
+    simplified = LineString(coords_xy).simplify(
+        tolerance_meters,
+        preserve_topology=False
+    )
+
+    if simplified.is_empty:
+        return data[[0, -1]]
+
+    coords = np.asarray(simplified.coords, dtype=float)
+    result = np.column_stack((
+        coords[:, 1] / meters_per_degree_lat,
+        coords[:, 0] / meters_per_degree_lon
+    ))
+
+    # Always retain the exact original endpoints.
+    result[0] = data[0]
+    result[-1] = data[-1]
+    return result
 START_COORDS= (43.7, -72.3)     # map center (e.g., New Hampshire)
 ZOOM=8  #starting map zoom
 
@@ -65,29 +118,6 @@ def extract_fit_info(fit_file: str, activities_df: pd.DataFrame) -> tuple:
         print(f"FIT read error {fit_file}: {e}")
         return "fail", "fail", "fail"
 
-# Using distance based sampling to reduce file size
-    # def read_fit_trackpoints(fit_file: str) -> np.ndarray:
-#     """Return lat/lon points from a FIT file"""
-#     try:
-#         from_point=[0,0]
-#         fit = FitFile(fit_file)
-#         lat_lon_data = []
-#         for record in fit.get_messages('record'):
-#             lat = record.get_value('position_lat')
-#             lon = record.get_value('position_long')
-#             if lat is not None and lon is not None:
-#                 # convert semicircles to degrees (from google)
-#                 lat_deg = lat * (180 / 2**31)
-#                 lon_deg = lon * (180 / 2**31)
-#                 distance = geodesic(from_point, [lat_deg, lon_deg])
-#                 # print (distance.meters)
-#                 if distance.meters > MAXDIST:
-#                   lat_lon_data.append([lat_deg, lon_deg])
-#                   from_point=[lat_deg, lon_deg]
-
-#         return np.array(lat_lon_data)
-#     except:
-#         return np.array([])
 
 #Using no sampling to reduce file size
 def read_fit_trackpoints(fit_file: str) -> np.ndarray:
@@ -128,9 +158,6 @@ def main(args: Namespace) -> None:
     if not gpx_files and not fit_files:
         exit("ERROR: No GPX or FIT files found!")
 
-    # initialize map
-    # m = folium.Map(location=START_COORDS, zoom_start=ZOOM) #standard OpenStreetMap
-
     # custom mapbox map
     MAPBOX_TOKEN = "pk.eyJ1IjoibGJyZWdvdSIsImEiOiJjbWZyNXFnOWwwM2diMmlvcXB6M3M4bHdzIn0.ainJCdTcN4gJLONN7TBZHg"
 
@@ -160,70 +187,84 @@ def main(args: Namespace) -> None:
     """
     m.get_root().html.add_child(folium.Element(custom_css))
 
-    #This is for processing GPX files with no sampling beyond lat_lon_data[::12] downsample
+    # GPX routes are simplified with Douglas-Peucker rather than sampled at a fixed interval.
+    # =========================================================
+    # ADVENTURE MAP STATE
+    # =========================================================
+
+    # Python-side data used while building the HTML.
+    ride_years = set()
+
+    # JavaScript registry: every ride registers its invisible
+    # touch target and its visible line here.
+    m.get_root().html.add_child(Element("""
+    <script>
+    window.adventureRides = [];
+    </script>
+    """))
+
+    # =========================================================
+    # GPX ACTIVITIES
+    # =========================================================
+
     for gpx_file in gpx_files:
         print(f"Reading GPX {os.path.basename(gpx_file)}")
+
         activity_name, activity_date, activity_type = extract_gpx_info(gpx_file)
+
         lat_lon_data = []
-        with open(gpx_file, encoding='utf-8') as file:
+
+        with open(gpx_file, encoding="utf-8") as file:
             for line in file:
-                if '<trkpt' in line:
+                if "<trkpt" in line:
                     l = line.split('"')
                     lat_lon_data.append([float(l[1]), float(l[3])])
+
         lat_lon_data = np.array(lat_lon_data)
+
         if lat_lon_data.size == 0:
             continue
-        lat_lon_data = lat_lon_data[::12]  # downsample
 
-    # This is for processing GPX files with intelligent distance sampling
-    # from_point = [0,0]
-    # for gpx_file in gpx_files:
-    #     print(f"Reading GPX {os.path.basename(gpx_file)}")
-    #     activity_name, activity_date, activity_type = extract_gpx_info(gpx_file)
+        lat_lon_data = simplify_track(lat_lon_data)  # shape-preserving simplification
 
-    #     lat_lon_data = []
-    #     with open(gpx_file, encoding='utf-8') as file:
-    #         for line in file:
-    #             if '<trkpt' in line:
-    #                 l = line.split('"')
-    #                 lat_lon_data.append([float(l[1]), float(l[3])])
-        #print(len(lat_lon_data))
-        # for item in lat_lon_data:
-        #     distance = geodesic(from_point, item)
-        #     if distance.meters < MAXDIST:
-        #         lat_lon_data.remove(item)
-        #     else:
-        #         from_point=item
-        # print(len(lat_lon_data))
+        # ---------------------------------------------------------
+        # COLOR
+        # ---------------------------------------------------------
 
-        # GeoDataFrame
-        # df = pd.DataFrame(lat_lon_data, columns=['longitude', 'latitude'])
-        # gdf = gpd.GeoDataFrame(df,geometry=gpd.points_from_xy(df['longitude'], df['latitude']),
-        # crs="EPSG:4326")  # Specify the Coordinate Reference System (CRS))
-
-        # Simplify the geometry
-        # small_gdf= gdf.simplify(tolerance=100) # Adjust tolerance as needed
-        
-        # lat_lon_data = [(point.x, point.y) for point in gdf.geometry]
-        
-        # lat_lon_data = np.array(lat_lon_data)
-
-        # if lat_lon_data.size == 0:
-        #     continue
+        linecolor = "red"
+        lineweight = 1
 
         match activity_type:
             case "AlpineSki" | "NordicSki" | "IceSkate" | "BackcountrySki" | "Snowboard" | "Snowshoe":
-                linecolor="fuchsia"
-                lineweight=1.5
+                linecolor = "fuchsia"
+                lineweight = 1.5
+
         if ("fat" in activity_name.casefold()) and ("father" not in activity_name.casefold()):
-                linecolor="fuchsia"
-                lineweight=1.5
+            linecolor = "fuchsia"
+            lineweight = 1.5
+
+        # ---------------------------------------------------------
+        # YEAR / HEATMAP DATA
+        # ---------------------------------------------------------
+
+        try:
+            activity_year = datetime.strptime(
+                str(activity_date),
+                "%B %d, %Y %I:%M %p"
+            ).year
+            ride_years.add(activity_year)
+        except (ValueError, TypeError):
+            activity_year = None
+# ---------------------------------------------------------
+        # GEOJSON
+        # ---------------------------------------------------------
 
         geojson_feature = {
             "type": "Feature",
             "properties": {
                 "name": activity_name,
                 "date": activity_date,
+                "year": activity_year,
                 "color": linecolor,
                 "weight": lineweight
             },
@@ -233,7 +274,35 @@ def main(args: Namespace) -> None:
                     [lon, lat] for lat, lon in lat_lon_data.tolist()
                 ]
             }
-        }       
+        }
+
+        # ---------------------------------------------------------
+        # LARGE INVISIBLE TOUCH / HOVER TARGET
+        # ---------------------------------------------------------
+
+        hit_area = folium.GeoJson(
+            geojson_feature,
+            style_function=lambda x: {
+                "color": x["properties"]["color"],
+                "weight": 30,
+                "opacity": 0.0,
+            },
+            highlight_function=lambda x: {
+                "color": x["properties"]["color"],
+                "weight": 30,
+                "opacity": 0.0,
+            },
+            tooltip=folium.Tooltip(
+                f"<strong>{activity_name}</strong><br>"
+                f"{activity_date}<br>"
+                f"Tap again for more info",
+                sticky=True
+            )
+        ).add_to(m)
+
+        # ---------------------------------------------------------
+        # ACTUAL VISIBLE RIDE LINE
+        # ---------------------------------------------------------
 
         polyline = folium.GeoJson(
             geojson_feature,
@@ -246,73 +315,179 @@ def main(args: Namespace) -> None:
                 "color": "yellow",
                 "weight": x["properties"]["weight"] + 2,
                 "opacity": 1.0,
-            },
-            tooltip=folium.Tooltip(
-                f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info",
-                sticky=True
-            )
+            }
         ).add_to(m)
 
-        linecolor="red"
-        lineweight=1
+        # ---------------------------------------------------------
+        # STRAVA POPUP
+        # ---------------------------------------------------------
 
         activity_id = os.path.splitext(os.path.basename(gpx_file))[0]
         strava_url = f"https://www.strava.com/activities/{activity_id}"
+
         popup_content = f"""
         <strong>Activity:</strong> {activity_name}<br>
         <strong>Date:</strong> {activity_date}<br>
         <b><a href="{strava_url}" target="_blank">View on Strava</a></b>
         """
-        folium.Popup(popup_content, max_width=300).add_to(polyline)
 
-    # This is for proessing FIT files
+        folium.Popup(
+            popup_content,
+            max_width=300
+        ).add_to(hit_area)
+
+        # ---------------------------------------------------------
+        # REGISTER RIDE FOR DESKTOP + MOBILE INTERACTION
+        # ---------------------------------------------------------
+
+        hit_name = hit_area.get_name()
+        line_name = polyline.get_name()
+
+        m.get_root().html.add_child(Element(f"""
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {{
+            var hitLayer = {hit_name};
+            var visibleLine = {line_name};
+
+            var ride = {{
+                hitLayer: hitLayer,
+                visibleLine: visibleLine,
+                originalColor: "{linecolor}",
+                originalWeight: {lineweight},
+                year: {activity_year if activity_year is not None else "null"},
+                lastLatLng: null
+            }};
+
+            window.adventureRides.push(ride);
+
+            hitLayer.eachLayer(function(layer) {{
+                layer.on('click', function(e) {{
+                    L.DomEvent.stopPropagation(e);
+
+                    ride.lastLatLng = e.latlng;
+
+                    if (window.adventureManager) {{
+                        window.adventureManager.toggle(ride);
+                    }}
+                }});
+            }});
+        }});
+        </script>
+        """))
+
+    # =========================================================
+    # FIT ACTIVITIES
+    # =========================================================
+
     for fit_file in fit_files:
         print(f"Reading FIT {os.path.basename(fit_file)}")
+
         try:
             # Decompress if needed
             if fit_file.endswith(".gz"):
                 with gzip.open(fit_file, "rb") as f:
                     fit_bytes = f.read()
-                fit_path = f"temp_{os.path.basename(fit_file)}"  # temp name
+
+                fit_path = f"temp_{os.path.basename(fit_file)}"
+
                 with open(fit_path, "wb") as temp_file:
                     temp_file.write(fit_bytes)
             else:
                 fit_path = fit_file
 
-            activity_name, activity_date, activity_id, activity_type = extract_fit_info(fit_path, activities_df)
+            activity_name, activity_date, activity_id, activity_type = extract_fit_info(
+                fit_path,
+                activities_df
+            )
+
             if activity_name == "fail":
                 print(f"Failed to match {fit_file}")
                 continue
 
             lat_lon_data = read_fit_trackpoints(fit_path)
+
             if lat_lon_data.size == 0:
                 print(f"No trackpoints in {fit_file}")
                 continue
-            lat_lon_data = lat_lon_data[::8] # down sampling
+
+            lat_lon_data = simplify_track(lat_lon_data)  # shape-preserving simplification
+
+            # ---------------------------------------------------------
+            # COLOR
+            # ---------------------------------------------------------
+
+            linecolor = "red"
+            lineweight = 1
 
             match activity_type:
                 case "Alpine Ski" | "Nordic Ski" | "Ice Skate" | "Backcountry Ski" | "Snowboard" | "Snowshoe":
-                    linecolor="fuchsia"
-                    lineweight=1.5
+                    linecolor = "fuchsia"
+                    lineweight = 1.5
+
             if ("fat" in activity_name.casefold()) and ("father" not in activity_name.casefold()):
-                    linecolor="fuchsia"
-                    lineweight=1.5
+                linecolor = "fuchsia"
+                lineweight = 1.5
+
+            # ---------------------------------------------------------
+            # YEAR / HEATMAP DATA
+            # ---------------------------------------------------------
+
+            try:
+                activity_year = datetime.strptime(
+                str(activity_date),
+                "%B %d, %Y %I:%M %p"
+            ).year
+                ride_years.add(activity_year)
+            except (ValueError, TypeError):
+                activity_year = None
+# ---------------------------------------------------------
+            # GEOJSON
+            # ---------------------------------------------------------
 
             geojson_feature = {
-            "type": "Feature",
-            "properties": {
-                "name": activity_name,
-                "date": activity_date,
-                "color": linecolor,
-                "weight": lineweight
-            },
-            "geometry": {
-                "type": "LineString",
-                "coordinates": [
-                    [lon, lat] for lat, lon in lat_lon_data.tolist()
-                ]
+                "type": "Feature",
+                "properties": {
+                    "name": activity_name,
+                    "date": activity_date,
+                    "year": activity_year,
+                    "color": linecolor,
+                    "weight": lineweight
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                        [lon, lat] for lat, lon in lat_lon_data.tolist()
+                    ]
+                }
             }
-        }
+
+            # ---------------------------------------------------------
+            # LARGE INVISIBLE TOUCH / HOVER TARGET
+            # ---------------------------------------------------------
+
+            hit_area = folium.GeoJson(
+                geojson_feature,
+                style_function=lambda x: {
+                    "color": x["properties"]["color"],
+                    "weight": 30,
+                    "opacity": 0.0,
+                },
+                highlight_function=lambda x: {
+                    "color": x["properties"]["color"],
+                    "weight": 30,
+                    "opacity": 0.0,
+                },
+                tooltip=folium.Tooltip(
+                    f"<strong>{activity_name}</strong><br>"
+                    f"{activity_date}<br>"
+                    f"Tap again for more info",
+                    sticky=True
+                )
+            ).add_to(m)
+
+            # ---------------------------------------------------------
+            # ACTUAL VISIBLE RIDE LINE
+            # ---------------------------------------------------------
 
             polyline = folium.GeoJson(
                 geojson_feature,
@@ -325,30 +500,362 @@ def main(args: Namespace) -> None:
                     "color": "yellow",
                     "weight": x["properties"]["weight"] + 2,
                     "opacity": 1.0,
-                },
-                tooltip=folium.Tooltip(
-                    f"<strong>{activity_name}</strong><br>{activity_date}<br>Click for more info",
-                    sticky=True
-                )
+                }
             ).add_to(m)
 
-            linecolor='red'
-            lineweight=1
-        
+            # ---------------------------------------------------------
+            # STRAVA POPUP
+            # ---------------------------------------------------------
+
             strava_url = f"https://www.strava.com/activities/{activity_id}"
+
             popup_content = f"""
             <strong>Activity:</strong> {activity_name}<br>
             <strong>Date:</strong> {activity_date}<br>
             <b><a href="{strava_url}" target="_blank">View on Strava</a></b>
             """
-            folium.Popup(popup_content, max_width=300).add_to(polyline)
+
+            folium.Popup(
+                popup_content,
+                max_width=300
+            ).add_to(hit_area)
+
+            # ---------------------------------------------------------
+            # REGISTER RIDE FOR DESKTOP + MOBILE INTERACTION
+            # ---------------------------------------------------------
+
+            hit_name = hit_area.get_name()
+            line_name = polyline.get_name()
+
+            m.get_root().html.add_child(Element(f"""
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {{
+                var hitLayer = {hit_name};
+                var visibleLine = {line_name};
+
+                var ride = {{
+                    hitLayer: hitLayer,
+                    visibleLine: visibleLine,
+                    originalColor: "{linecolor}",
+                    originalWeight: {lineweight},
+                    year: {activity_year if activity_year is not None else "null"},
+                    lastLatLng: null
+                }};
+
+                window.adventureRides.push(ride);
+
+                hitLayer.eachLayer(function(layer) {{
+                    layer.on('click', function(e) {{
+                        L.DomEvent.stopPropagation(e);
+
+                        ride.lastLatLng = e.latlng;
+
+                        if (window.adventureManager) {{
+                            window.adventureManager.toggle(ride);
+                        }}
+                    }});
+                }});
+            }});
+            </script>
+            """))
 
         except Exception as e:
             print(f"Error reading FIT {fit_file}: {e}")
 
 
-    # Save map
-    # m.save(args.output)
+    # =========================================================
+    # YEAR SLIDER + REPLAY + HEATMAP
+    # =========================================================
+
+    years = sorted(ride_years)
+
+    if years:
+        min_year = years[0]
+        max_year = years[-1]
+
+        m.get_root().html.add_child(Element(f"""
+        <style>
+            #adventure-controls {{
+                position: fixed;
+                top: 10px;
+                right: 10px;
+                z-index: 9999;
+                background: rgba(255,255,255,0.97);
+                padding: 5px 6px;
+                border-radius: 8px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.28);
+                font-family: Arial, sans-serif;
+                width: 150px;
+                box-sizing: border-box;
+            }}
+
+            #adventure-controls button {{
+                min-height: 28px;
+                border: 1px solid #aaa;
+                border-radius: 6px;
+                background: white;
+                font-size: 11px;
+                cursor: pointer;
+            }}
+
+            #adventure-controls button:active {{
+                transform: translateY(1px);
+            }}
+
+            #year-slider {{
+                width: 100%;
+                min-height: 20px;
+                cursor: pointer;
+            }}
+
+            @media (max-width: 600px) {{
+                #adventure-controls {{
+                    top: 6px;
+                    right: 6px;
+                    width: 140px;
+                    padding: 4px 5px;
+                }}
+
+                #adventure-controls button {{
+                    min-height: 30px;
+                    font-size: 11px;
+                }}
+            }}
+        </style>
+
+        <div id="adventure-controls">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong>Adventure History</strong>
+                <strong id="selected-year">{max_year}</strong>
+            </div>
+
+            <input id="year-slider"
+                   type="range"
+                   min="{min_year}"
+                   max="{max_year}"
+                   value="{max_year}"
+                   step="1">
+
+            <div style="display:flex;justify-content:space-between;font-size:9px;color:#666;">
+                <span>{min_year}</span>
+                <span>{max_year}</span>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr;gap:5px;margin-top:6px;">
+                <button id="replay-button" type="button">▶ Replay</button>
+            </div>
+        </div>
+        """))
+
+        # Escape braces for JavaScript because this is an f-string.
+        m.get_root().html.add_child(Element(f"""
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {{
+
+            var map = {m.get_name()};
+
+            var slider = document.getElementById('year-slider');
+            var yearDisplay = document.getElementById('selected-year');
+            var replayButton = document.getElementById('replay-button');
+
+            var minYear = {min_year};
+            var maxYear = {max_year};
+
+            console.log(
+                "Adventure controls loaded:",
+                minYear,
+                maxYear,
+                "rides:",
+                window.adventureRides.length
+            );
+
+            var selectedRide = null;
+            var replayTimer = null;
+
+            // -------------------------------------------------
+            // RIDE SELECTION MANAGER
+            // -------------------------------------------------
+
+            window.adventureManager = {{
+
+                deselect: function(ride) {{
+                    if (!ride) return;
+
+                    ride.visibleLine.setStyle({{
+                        color: ride.originalColor,
+                        weight: ride.originalWeight,
+                        opacity: 1.0
+                    }});
+
+                    ride.hitLayer.closeTooltip();
+                }},
+
+                select: function(ride) {{
+
+                    if (selectedRide && selectedRide !== ride) {{
+                        this.deselect(selectedRide);
+                    }}
+
+                    selectedRide = ride;
+
+                    ride.visibleLine.setStyle({{
+                        color: 'yellow',
+                        weight: ride.originalWeight + 2,
+                        opacity: 1.0
+                    }});
+
+                    ride.visibleLine.bringToFront();
+
+                    if (ride.lastLatLng) {{
+                        ride.hitLayer.openTooltip(ride.lastLatLng);
+                    }}
+                }},
+
+                toggle: function(ride) {{
+
+                    // First tap/click selects.
+                    if (selectedRide !== ride) {{
+                        this.select(ride);
+                        return;
+                    }}
+
+                    // Second tap/click opens the popup.
+                    if (ride.lastLatLng) {{
+                        ride.hitLayer.openPopup(ride.lastLatLng);
+                    }}
+                }},
+
+                clear: function() {{
+
+                    if (selectedRide) {{
+                        this.deselect(selectedRide);
+                        selectedRide = null;
+                    }}
+                }}
+            }};
+
+
+            // -------------------------------------------------
+            // SHOW RIDES THROUGH SELECTED YEAR
+            // -------------------------------------------------
+
+            function updateYears(selectedYear) {{
+
+                selectedYear = parseInt(selectedYear, 10);
+                yearDisplay.textContent = selectedYear;
+
+                window.adventureRides.forEach(function(ride) {{
+
+                    if (ride.year === null) {{
+                        return;
+                    }}
+
+                    var shouldShow = ride.year <= selectedYear;
+
+                    if (shouldShow) {{
+
+                        if (!map.hasLayer(ride.hitLayer)) {{
+                            map.addLayer(ride.hitLayer);
+                        }}
+
+                        if (!map.hasLayer(ride.visibleLine)) {{
+                            map.addLayer(ride.visibleLine);
+                        }}
+
+                    }} else {{
+
+                        if (map.hasLayer(ride.hitLayer)) {{
+                            map.removeLayer(ride.hitLayer);
+                        }}
+
+                        if (map.hasLayer(ride.visibleLine)) {{
+                            map.removeLayer(ride.visibleLine);
+                        }}
+
+                        if (selectedRide === ride) {{
+                            window.adventureManager.deselect(ride);
+                            selectedRide = null;
+                        }}
+                    }}
+                }});
+            }}
+
+            slider.addEventListener('input', function() {{
+                updateYears(this.value);
+            }});
+
+
+// -------------------------------------------------
+            // REPLAY YEARS
+            // -------------------------------------------------
+
+            replayButton.addEventListener('click', function() {{
+
+                if (replayTimer !== null) {{
+
+                    clearInterval(replayTimer);
+                    replayTimer = null;
+                    replayButton.textContent = '▶ Replay';
+                    return;
+                }}
+
+                window.adventureManager.clear();
+
+                var currentYear = minYear;
+
+                slider.value = currentYear;
+                updateYears(currentYear);
+
+                replayButton.textContent = '⏸ Pause';
+
+                replayTimer = setInterval(function() {{
+
+                    currentYear += 1;
+
+                    slider.value = currentYear;
+                    updateYears(currentYear);
+
+                    if (currentYear >= maxYear) {{
+
+                        clearInterval(replayTimer);
+                        replayTimer = null;
+                        replayButton.textContent = '▶ Replay';
+                    }}
+
+                }}, 900);
+            }});
+
+
+            // -------------------------------------------------
+            // MAP BACKGROUND DESELECT
+            // -------------------------------------------------
+
+            map.on('click', function() {{
+                window.adventureManager.clear();
+            }});
+
+
+            // -------------------------------------------------
+            // INITIAL STATE
+            // -------------------------------------------------
+
+            updateYears(maxYear);
+
+        }});
+        </script>
+        """))
+
+    else:
+        m.get_root().html.add_child(Element("""
+        <div id="adventure-controls"
+             style="position:fixed;top:10px;left:50%;transform:translateX(-50%);
+                    z-index:9999;background:white;padding:12px 16px;
+                    border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.3);
+                    font-family:Arial,sans-serif;">
+            No activity years could be parsed.
+        </div>
+        """))
+
 
     m.save(outfile=args.output)
     print(f"Saved interactive map to {args.output}")
@@ -367,139 +874,4 @@ if __name__ == "__main__":
         args.gpx_dir="gpxtest"
         args.fit_dir="fittest"
     main(args)
-
-# Faster code, only for gpx files!
-# import os
-# import glob
-# import numpy as np
-# import folium
-# from argparse import ArgumentParser, Namespace
-# from xml.etree import ElementTree as ET
-# from datetime import datetime
-
-
-# def extract_gpx_info(gpx_file: str) -> tuple:
-#     # goal of this func: extract activity name and date from the GPX file
-#     tree = ET.parse(gpx_file)
-#     root = tree.getroot()
-
-
-#     namespace = {'gpx': 'http://www.topografix.com/GPX/1/1'}
-
-#     # getting name and date
-#     name = root.find('.//gpx:name', namespace).text
-#     time = root.find('.//gpx:metadata/gpx:time', namespace).text
-
-#     # parse date
-#     date_obj = datetime.strptime(time, '%Y-%m-%dT%H:%M:%SZ')
-
-#     # format the date to make more readable so it presents like "April 20, 2013"
-#     formatted_date = date_obj.strftime('%B %d, %Y') 
-#     return name, formatted_date
-
-
-# def main(args: Namespace) -> None:
-#     # read GPX trackpoints
-#     gpx_files = glob.glob(f'{args.dir}/{args.filter}')
-
-#     #TODO: another file or in here somewhere convert fit to gpx file or just add a case for if it is a fit file
-#     if not gpx_files:
-#         exit(f'ERROR no data matching {args.dir}/{args.filter}')
-
-
-
-#     map_center = [0, 0]
-#     m = folium.Map(location=map_center, zoom_start=ZOOM)
-
-#     for gpx_file in gpx_files:
-#         print(f'Reading {os.path.basename(gpx_file)}')
-
-#         # use helper func to get name and date
-#         activity_name, activity_date = extract_gpx_info(gpx_file)
-
-#         lat_lon_data = []
-#         with open(gpx_file, encoding='utf-8') as file:
-#             for line in file:
-#                 if '<trkpt' in line:
-#                     l = line.split('"')
-#                     lat_lon_data.append([float(l[1]), float(l[3])])
-
-#         lat_lon_data = np.array(lat_lon_data)
-#         if lat_lon_data.size == 0:
-#             exit(f'ERROR no data in {gpx_file}')
-#         print(f'Read {lat_lon_data.shape[0]} trackpoints in {os.path.basename(gpx_file)}')
-
-#         # downsample the data ( make the map load fast!)
-#         lat_lon_data = lat_lon_data[::8]  # Here I currently have this number set to 8 which means it will only plot every 8th point.
-#         #If you want more detail you can lower this number (map will load slower) and if you want it to be faster you can make this number higher (less detail).
-
-#         # find bounding box for this specific route
-#         lat_min, lon_min = np.min(lat_lon_data, axis=0)
-#         lat_max, lon_max = np.max(lat_lon_data, axis=0)
-
-#         # update map center (ultimately, the average of all routes)
-#         map_center = [np.mean(lat_lon_data[:, 0]), np.mean(lat_lon_data[:, 1])]
-#         m.location = map_center
-
-#         #  CSS for tooltip
-#         custom_css = """
-#         <style>
-#             .leaflet-tooltip.custom-tooltip-style {
-#                 background-color: #007bff;
-#                 color: yellow;
-#                 border: 2px solid green;
-#                 font-size: 16px;
-#                 padding: 8px;
-#                 border-radius: 3px;
-#             }
-#             .leaflet-interactive:focus {
-#                 outline: none !important;
-#             }
-#         </style>
-#         """
-#         # Inject the CSS into the map (found on google)
-#         m.get_root().html.add_child(folium.Element(custom_css))
-
-#         # add GPX data as a polyline (for each ride independently), this is so the user can hover/click anywhere on the route to get more info instead of having specific buttons along the route they have to press to get the info.
-#         polyline = folium.PolyLine(
-#             locations=lat_lon_data.tolist(),  # list of [lat, lon] points
-#             color="fuchsia",  # Here you can change the color of the line
-#             weight=2,  # line thickness
-#             opacity=0.8, 
-#             tooltip=(
-#                 '<strong>' + activity_name + '</strong>' + '<br>' + activity_date + '<br>' + 'Click for more info'
-#             )
-#         ).add_to(m)
-
-#         # We realized the link to every activity is www.strava.com/activities/ (a specific ID number for that activity)
-#         #That ID number also happened to be the name ofeach gpx file
-#         #Here we are extracting the file name without extension
-#         gpx_filename = os.path.basename(gpx_file)
-#         activity_id = os.path.splitext(gpx_filename)[0]  # remove the .gpx
-
-#         # create Strava URL
-#         strava_url = f'https://www.strava.com/activities/{activity_id}'
-
-#         # popup  with activity name, date, and Strava link
-#         popup_content = f"""
-#         <strong>Activity:</strong> {activity_name}<br>
-#         <strong>Date:</strong> {activity_date}<br>
-#         <a href="{strava_url}" target="_blank">View on Strava</a>
-#         """
-
-#         # attaching the popup to the polyline (when clicked, shows the activity info)
-#         folium.Popup(popup_content, max_width=300).add_to(polyline)
-
-#     # saving the interactive map to HTML file
-#     m.save(args.output)
-#     print(f'Saved interactive map to {args.output}')
-
-
-# if __name__ == '__main__':
-#     parser = ArgumentParser(description='Generate an interactive line map from GPX data')
-#     parser.add_argument('--dir', default='gpx', help='GPX files directory (default: gpx)')
-#     parser.add_argument('--filter', default='*.gpx', help='GPX files glob filter (default: *.gpx)')
-#     parser.add_argument('--output', default='track_lines_map.html', help='Interactive map output file (default: track_lines_map.html)')
-#     args = parser.parse_args()
-#     main(args)
 
