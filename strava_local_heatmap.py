@@ -736,48 +736,78 @@ def main(args: Namespace) -> None:
 
 
             // -------------------------------------------------
-            // SHOW RIDES THROUGH SELECTED YEAR
+            // RESPONSIVE YEAR UPDATES
             // -------------------------------------------------
+
+            var yearUpdateToken = 0;
+            var yearUpdateRunning = false;
 
             function updateYears(selectedYear) {{
 
                 selectedYear = parseInt(selectedYear, 10);
                 yearDisplay.textContent = selectedYear;
 
-                window.adventureRides.forEach(function(ride) {{
+                var token = ++yearUpdateToken;
+                var rides = window.adventureRides || [];
+                var index = 0;
+                var batchSize = 12;
 
-                    if (ride.year === null) {{
+                function processBatch() {{
+
+                    if (token !== yearUpdateToken) {{
                         return;
                     }}
 
-                    var shouldShow = ride.year <= selectedYear;
+                    var end = Math.min(index + batchSize, rides.length);
 
-                    if (shouldShow) {{
+                    for (; index < end; index++) {{
 
-                        if (!map.hasLayer(ride.hitLayer)) {{
-                            map.addLayer(ride.hitLayer);
+                        var ride = rides[index];
+
+                        if (ride.year === null) {{
+                            continue;
                         }}
 
-                        if (!map.hasLayer(ride.visibleLine)) {{
-                            map.addLayer(ride.visibleLine);
-                        }}
+                        var shouldShow = ride.year <= selectedYear;
 
-                    }} else {{
+                        if (shouldShow) {{
 
-                        if (map.hasLayer(ride.hitLayer)) {{
-                            map.removeLayer(ride.hitLayer);
-                        }}
+                            if (!map.hasLayer(ride.hitLayer)) {{
+                                map.addLayer(ride.hitLayer);
+                            }}
 
-                        if (map.hasLayer(ride.visibleLine)) {{
-                            map.removeLayer(ride.visibleLine);
-                        }}
+                            if (!map.hasLayer(ride.visibleLine)) {{
+                                map.addLayer(ride.visibleLine);
+                            }}
 
-                        if (selectedRide === ride) {{
-                            window.adventureManager.deselect(ride);
-                            selectedRide = null;
+                        }} else {{
+
+                            if (map.hasLayer(ride.hitLayer)) {{
+                                map.removeLayer(ride.hitLayer);
+                            }}
+
+                            if (map.hasLayer(ride.visibleLine)) {{
+                                map.removeLayer(ride.visibleLine);
+                            }}
+
+                            if (selectedRide === ride) {{
+                                window.adventureManager.deselect(ride);
+                                selectedRide = null;
+                            }}
                         }}
                     }}
-                }});
+
+                    if (index < rides.length) {{
+                        window.requestAnimationFrame(processBatch);
+                    }} else {{
+                        yearUpdateRunning = false;
+                    }}
+                }}
+
+                yearUpdateRunning = true;
+
+                // Yield before starting a potentially expensive Leaflet update.
+                window.requestAnimationFrame(processBatch);
             }}
 
             slider.addEventListener('input', function() {{
@@ -785,7 +815,7 @@ def main(args: Namespace) -> None:
             }});
 
 
-// -------------------------------------------------
+            // -------------------------------------------------
             // REPLAY YEARS
             // -------------------------------------------------
 
@@ -793,36 +823,66 @@ def main(args: Namespace) -> None:
 
                 if (replayTimer !== null) {{
 
-                    clearInterval(replayTimer);
+                    clearTimeout(replayTimer);
                     replayTimer = null;
+                    yearUpdateToken++;
                     replayButton.textContent = '▶ Replay';
                     return;
                 }}
 
                 window.adventureManager.clear();
 
-                var currentYear = minYear;
-
-                slider.value = currentYear;
-                updateYears(currentYear);
-
                 replayButton.textContent = '⏸ Pause';
 
-                replayTimer = setInterval(function() {{
+                var currentYear = minYear;
 
-                    currentYear += 1;
+                function playNextYear() {{
 
-                    slider.value = currentYear;
-                    updateYears(currentYear);
-
-                    if (currentYear >= maxYear) {{
-
-                        clearInterval(replayTimer);
-                        replayTimer = null;
-                        replayButton.textContent = '▶ Replay';
+                    if (replayTimer === null) {{
+                        return;
                     }}
 
-                }}, 900);
+                    slider.value = currentYear;
+
+                    updateYears(currentYear);
+
+                    // Wait for this year's batched rendering to finish before
+                    // scheduling the next year.
+                    function waitForUpdate() {{
+
+                        if (replayTimer === null) {{
+                            return;
+                        }}
+
+                        if (yearUpdateRunning) {{
+                            window.requestAnimationFrame(waitForUpdate);
+                            return;
+                        }}
+
+                        if (currentYear >= maxYear) {{
+                            clearTimeout(replayTimer);
+                            replayTimer = null;
+                            replayButton.textContent = '▶ Replay';
+                            return;
+                        }}
+
+                        currentYear++;
+
+                        replayTimer = setTimeout(function() {{
+                            playNextYear();
+                        }}, 900);
+                    }}
+
+                    window.requestAnimationFrame(waitForUpdate);
+                }}
+
+                // Yield twice before the first year transition. This is
+                // especially important on iPhone/Safari immediately after load.
+                replayTimer = setTimeout(function() {{
+                    window.requestAnimationFrame(function() {{
+                        window.requestAnimationFrame(playNextYear);
+                    }});
+                }}, 50);
             }});
 
 
@@ -839,7 +899,13 @@ def main(args: Namespace) -> None:
             // INITIAL STATE
             // -------------------------------------------------
 
-            updateYears(maxYear);
+            // Defer initial route activation until after the initial
+            // Leaflet render has had a chance to complete.
+            window.requestAnimationFrame(function() {{
+                window.requestAnimationFrame(function() {{
+                    updateYears(maxYear);
+                }});
+            }});
 
         }});
         </script>
