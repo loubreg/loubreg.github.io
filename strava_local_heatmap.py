@@ -784,19 +784,65 @@ def main(args: Namespace) -> None:
                 selectedYear = parseInt(selectedYear, 10);
                 yearDisplay.textContent = selectedYear;
 
-                var rules = [
-                    '.adventure-ride-path {{ display: none !important; }}'
-                ];
+                var rides = window.adventureRides || [];
+                var previousYear = window.currentDisplayedYear;
+                var changes = [];
 
-                for (var year = minYear; year <= selectedYear; year++) {{
-                    rules.push(
-                        '.adventure-ride-path.ride-year-' + year +
-                        ' {{ display: inherit !important; }}'
-                    );
+                if (previousYear === undefined || previousYear === null) {{
+                    changes = rides.slice();
+                }} else if (selectedYear > previousYear) {{
+
+                    for (var y = previousYear + 1; y <= selectedYear; y++) {{
+                        for (var i = 0; i < rides.length; i++) {{
+                            if (rides[i].year === y) {{
+                                changes.push(rides[i]);
+                            }}
+                        }}
+                    }}
+
+                }} else if (selectedYear < previousYear) {{
+
+                    for (var y2 = previousYear; y2 > selectedYear; y2--) {{
+                        for (var j = 0; j < rides.length; j++) {{
+                            if (rides[j].year === y2) {{
+                                changes.push(rides[j]);
+                            }}
+                        }}
+                    }}
                 }}
 
-                rideYearStyle.textContent = rules.join('\n');
                 window.currentDisplayedYear = selectedYear;
+
+                for (var k = 0; k < changes.length; k++) {{
+
+                    var ride = changes[k];
+
+                    if (ride.year === null) {{
+                        continue;
+                    }}
+
+                    if (ride.year <= selectedYear) {{
+                        if (!map.hasLayer(ride.hitLayer)) {{
+                            map.addLayer(ride.hitLayer);
+                        }}
+                        if (!map.hasLayer(ride.visibleLine)) {{
+                            map.addLayer(ride.visibleLine);
+                        }}
+                    }} else {{
+                        if (map.hasLayer(ride.hitLayer)) {{
+                            map.removeLayer(ride.hitLayer);
+                        }}
+                        if (map.hasLayer(ride.visibleLine)) {{
+                            map.removeLayer(ride.visibleLine);
+                        }}
+
+                        if (selectedRide === ride) {{
+                            window.adventureManager.deselect(ride);
+                            selectedRide = null;
+                        }}
+                    }}
+                }}
+
                 yearUpdateRunning = false;
             }}
 
@@ -805,22 +851,15 @@ def main(args: Namespace) -> None:
             }});
 
 
-slider.addEventListener('input', function() {{
-                updateYears(this.value);
-            }});
-
-
-            // -------------------------------------------------            // -------------------------------------------------
+            // -------------------------------------------------
             // REPLAY YEARS
             // -------------------------------------------------
 
             replayButton.addEventListener('click', function() {{
 
                 if (replayTimer !== null) {{
-
                     clearTimeout(replayTimer);
                     replayTimer = null;
-                    yearUpdateToken++;
                     replayButton.textContent = '▶ Replay';
                     return;
                 }}
@@ -846,16 +885,16 @@ slider.addEventListener('input', function() {{
                     }}
 
                     currentYear++;
-                    replayTimer = setTimeout(playNextYear, 450);
+                    replayTimer = setTimeout(playNextYear, 300);
                 }}
 
+                // Let Safari finish initial Leaflet rendering first.
                 replayTimer = setTimeout(function() {{
                     window.requestAnimationFrame(function() {{
                         window.requestAnimationFrame(playNextYear);
                     }});
                 }}, 50);
             }});
-
 
 
             // MAP BACKGROUND DESELECT
@@ -873,7 +912,11 @@ slider.addEventListener('input', function() {{
             window.requestAnimationFrame(function() {{
                 window.requestAnimationFrame(function() {{
                     prepareRidePaths();
+                    window.requestAnimationFrame(function() {{
+                window.requestAnimationFrame(function() {{
                     updateYears(maxYear);
+                }});
+            }});
                 }});
             }});
         }});
